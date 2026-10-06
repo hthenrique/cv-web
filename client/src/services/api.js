@@ -1,7 +1,32 @@
-const API_BASE =
-  typeof window !== 'undefined' && window.location.port !== '5000' && window.location.port !== ''
-    ? 'http://localhost:5000/api'
-    : '/api';
+// Resolves the backend API base URL supporting environment variables (e.g. Vercel deployment)
+function resolveApiBase() {
+  const envUrl = (
+    import.meta.env.VITE_API_URL ||
+    import.meta.env.VITE_API_BASE ||
+    import.meta.env.VITE_BACKEND_URL ||
+    ''
+  ).trim();
+
+  if (envUrl) {
+    const cleanUrl = envUrl.replace(/\/+$/, '');
+    return cleanUrl.endsWith('/api') ? cleanUrl : `${cleanUrl}/api`;
+  }
+
+  // Fallback for local development when running Vite dev server on localhost
+  if (typeof window !== 'undefined') {
+    const isLocalhost =
+      window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1';
+
+    if (isLocalhost && window.location.port !== '5000') {
+      return 'http://localhost:5000/api';
+    }
+  }
+
+  return '/api';
+}
+
+export const API_BASE = resolveApiBase();
 
 export const USER_UUID_KEY = 'curriculo_user_uuid';
 export const USER_DATA_KEY = 'curriculo_user_data';
