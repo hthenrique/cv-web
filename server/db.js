@@ -2,13 +2,19 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const os = require('os');
 
-// Detect serverless environment (Vercel / AWS Lambda) where only /tmp is writable
+// Detect serverless environment (Vercel / AWS Lambda) where only tmp is writable
 const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
-const dbDir = isServerless ? '/tmp' : __dirname;
+const dbDir = isServerless ? (process.platform === 'win32' ? os.tmpdir() : '/tmp') : __dirname;
+if (isServerless && !fs.existsSync(dbDir)) {
+  try {
+    fs.mkdirSync(dbDir, { recursive: true });
+  } catch (_) {}
+}
 const dbPath = path.join(dbDir, 'curriculo.db');
 
-// If running in serverless and /tmp/curriculo.db does not exist, copy existing db if available
+// If running in serverless and curriculo.db does not exist, copy existing db if available
 if (isServerless && !fs.existsSync(dbPath)) {
   const seedFile = path.join(__dirname, 'curriculo.db');
   if (fs.existsSync(seedFile)) {

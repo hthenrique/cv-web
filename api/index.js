@@ -1,7 +1,6 @@
 let app;
 
 module.exports = (req, res) => {
-  // Always send CORS headers so the browser does not mask errors with a CORS block
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-User-UUID');
@@ -13,13 +12,13 @@ module.exports = (req, res) => {
 
   try {
     if (!app) {
-      app = require('../index');
+      app = require('./server/index');
     }
     return app(req, res);
   } catch (err) {
-    console.error('Vercel serverless error:', err);
+    console.error('Vercel root serverless error:', err);
     return res.status(500).json({
-      error: 'SERVERLESS_LOAD_ERROR',
+      error: 'SERVERLESS_ROOT_LOAD_ERROR',
       message: err.message,
       stack: err.stack,
       node: process.version,
@@ -28,4 +27,3 @@ module.exports = (req, res) => {
     });
   }
 };
-
