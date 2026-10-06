@@ -8,3 +8,5 @@ client/dist/
 scratch*
 uploads/
 server/uploads/
+server/*.db*
+*.db*
