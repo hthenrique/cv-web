@@ -57,8 +57,9 @@ export default function ResumePreview({ resume, language, zoom = 1 }) {
     }
   }, [resume, language]);
 
-  const { theme, photoUrl } = resume;
   const lang = language || resume.activeLanguage || 'pt';
+  const theme = resume.themes?.[lang] || resume.theme || {};
+  const photoUrl = resume.photoUrl;
   const data = resume.translations?.[lang] || resume.translations?.['pt'] || {};
 
   const {

@@ -29,6 +29,16 @@ npm run client
 
 ## ✨ Funcionalidades
 
+- 🔐 **Sistema de Autenticação & Multi-Usuário (Isolamento por UUID)**:
+  - **Tela de Login e Cadastro**: interface moderna com abas para login e cadastro de novas contas.
+  - **Currículos 100% Isolados**: cada usuário possui seu próprio currículo no SQLite e não pode acessar ou alterar o currículo de outros usuários.
+  - **Persistência de Sessão**: o UUID do usuário é salvo no navegador (`localStorage`) para identificação automática ao retornar à aplicação.
+  - **Proteção de Rotas**: caso o usuário não esteja autenticado, a tela de login é exibida obrigatoriamente.
+  - **Conta Demo / Acesso Rápido**:
+    - **E-mail**: `ht.henrique@live.com`
+    - **Senha**: `123456`
+  - **Alteração de Senha**: modal completo para troca segura de senha com verificação da senha atual, validação de tamanho mínimo e confirmação.
+
 - 🇧🇷 **Multilíngue (Português & Inglês)**:
   - Alternância com 1 clique entre as versões em **Português** e **Inglês**.
   - Ambas as versões já iniciam pré-preenchidas com os dados profissionais de Henrique Teixeira.

@@ -85,7 +85,8 @@ export default function ResumeEditor({
 
   const currentLang = activeLanguage || resume.activeLanguage || 'pt';
   const langData = resume.translations?.[currentLang] || {};
-  const theme = resume.theme || {};
+  const currentTheme = resume.themes?.[currentLang] || resume.theme || {};
+  const theme = currentTheme;
 
   // Generic updater for translation content
   const updateLangData = (field, value) => {
@@ -102,14 +103,42 @@ export default function ResumeEditor({
     });
   };
 
-  // Generic updater for theme config
+  // Generic updater for theme config per active language
   const updateTheme = (field, value) => {
+    const updatedLangTheme = {
+      ...currentTheme,
+      [field]: value
+    };
+    const updatedThemes = {
+      ...(resume.themes || { pt: resume.theme, en: resume.theme }),
+      [currentLang]: updatedLangTheme
+    };
+
     onChange({
       ...resume,
-      theme: {
-        ...theme,
-        [field]: value
-      }
+      theme: updatedLangTheme,
+      themes: updatedThemes
+    });
+  };
+
+  // Apply color preset for the active language
+  const applyPreset = (preset) => {
+    const updatedLangTheme = {
+      ...currentTheme,
+      sidebarColor: preset.sidebarColor,
+      sidebarTextColor: preset.sidebarTextColor,
+      accentColor: preset.accentColor,
+      nameColor: preset.nameColor || preset.sidebarColor
+    };
+    const updatedThemes = {
+      ...(resume.themes || { pt: resume.theme, en: resume.theme }),
+      [currentLang]: updatedLangTheme
+    };
+
+    onChange({
+      ...resume,
+      theme: updatedLangTheme,
+      themes: updatedThemes
     });
   };
 
@@ -689,28 +718,49 @@ export default function ResumeEditor({
               </div>
             </div>
 
+            {/* ACTIVE LANGUAGE THEME NOTICE & SYNC */}
+            <div className="flex items-center justify-between bg-blue-50/60 border border-blue-200/80 px-3.5 py-2.5 rounded-xl">
+              <div className="flex items-center gap-2 text-xs font-bold text-slate-800">
+                <span className="text-base">{currentLang === 'pt' ? '🇧🇷' : '🇺🇸'}</span>
+                <span>
+                  Cores do tema em: <span className="text-blue-700 font-extrabold">{currentLang === 'pt' ? 'Português' : 'English'}</span>
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const otherLang = currentLang === 'pt' ? 'en' : 'pt';
+                  const otherTheme = resume.themes?.[otherLang] || resume.theme;
+                  if (otherTheme) {
+                    const updatedThemes = {
+                      ...(resume.themes || { pt: resume.theme, en: resume.theme }),
+                      [currentLang]: { ...otherTheme }
+                    };
+                    onChange({
+                      ...resume,
+                      theme: { ...otherTheme },
+                      themes: updatedThemes
+                    });
+                  }
+                }}
+                className="text-[11px] text-blue-700 hover:text-blue-900 font-bold hover:underline cursor-pointer"
+                title={`Copiar e aplicar as cores configuradas para ${currentLang === 'pt' ? 'English' : 'Português'}`}
+              >
+                Copiar do {currentLang === 'pt' ? 'Inglês' : 'Português'}
+              </button>
+            </div>
+
             {/* COLOR PALETTES PRESETS */}
             <div>
               <label className="block text-xs font-bold text-slate-900 uppercase tracking-wide mb-2">
-                Paletas de Cores Prontas
+                Paletas de Cores Prontas ({currentLang === 'pt' ? 'PT' : 'EN'})
               </label>
               <div className="grid grid-cols-2 gap-2">
                 {COLOR_PRESETS.map((preset) => (
                   <button
                     key={preset.name}
-                    onClick={() => {
-                      onChange({
-                        ...resume,
-                        theme: {
-                          ...theme,
-                          sidebarColor: preset.sidebarColor,
-                          sidebarTextColor: preset.sidebarTextColor,
-                          accentColor: preset.accentColor,
-                          nameColor: preset.nameColor
-                        }
-                      });
-                    }}
-                    className="flex items-center gap-2 p-2 border border-slate-200 rounded-lg hover:border-blue-400 bg-white transition text-left"
+                    onClick={() => applyPreset(preset)}
+                    className="flex items-center gap-2 p-2 border border-slate-200 rounded-lg hover:border-blue-400 bg-white transition text-left cursor-pointer"
                   >
                     <div className="flex gap-1">
                       <span

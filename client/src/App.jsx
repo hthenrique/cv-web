@@ -2,42 +2,97 @@ import React, { useState, useEffect } from 'react';
 import TopBar from './components/TopBar';
 import ResumeEditor from './components/ResumeEditor';
 import ResumePreview from './components/ResumePreview';
-import { fetchResume, saveResume, resetResume } from './services/api';
+import AuthScreen from './components/AuthScreen';
+import ChangePasswordModal from './components/ChangePasswordModal';
+import {
+  fetchResume,
+  saveResume,
+  resetResume,
+  getMe,
+  logout,
+  getUserUuid
+} from './services/api';
 import { exportToPdf, printResume } from './utils/pdfExport';
 import { Loader2 } from 'lucide-react';
 
 function App() {
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authChecking, setAuthChecking] = useState(true);
   const [resume, setResume] = useState(null);
   const [activeLanguage, setActiveLanguage] = useState('pt');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [showEditor, setShowEditor] = useState(true);
   const [zoom, setZoom] = useState(0.85);
+  const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
 
-  // Load initial resume data from SQLite backend
+  // Check stored user UUID in browser at startup
   useEffect(() => {
-    async function loadData() {
+    async function checkAuthSession() {
       try {
-        setLoading(true);
-        const data = await fetchResume();
-        setResume(data);
-        if (data.activeLanguage) {
-          setActiveLanguage(data.activeLanguage);
+        const savedUuid = getUserUuid();
+        if (!savedUuid) {
+          setCurrentUser(null);
+          setAuthChecking(false);
+          return;
+        }
+
+        // Validate session with backend SQLite
+        const user = await getMe();
+        if (user && user.uuid) {
+          setCurrentUser(user);
+          // Load this user's isolated resume
+          setLoading(true);
+          const data = await fetchResume();
+          setResume(data);
+          // O padrão deve sempre iniciar em português (pt)
+          setActiveLanguage('pt');
+        } else {
+          setCurrentUser(null);
         }
       } catch (err) {
-        console.error('Erro ao carregar dados:', err);
+        console.error('Falha ao verificar sessão ou carregar dados:', err);
+        setCurrentUser(null);
       } finally {
+        setAuthChecking(false);
         setLoading(false);
       }
     }
-    loadData();
+
+    checkAuthSession();
   }, []);
 
-  // Save changes to SQLite
+  // Handle successful login/registration
+  const handleLoginSuccess = async (user) => {
+    setCurrentUser(user);
+    try {
+      setLoading(true);
+      const data = await fetchResume();
+      setResume(data);
+      // Sempre iniciar na versão em português ao logar
+      setActiveLanguage('pt');
+    } catch (err) {
+      console.error('Erro ao carregar currículo do usuário:', err);
+      alert('Aviso: Não foi possível carregar os dados do currículo: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle user logout
+  const handleLogout = () => {
+    if (window.confirm('Deseja realmente sair da sua conta? Seu progresso salvo no SQLite permanecerá intacto.')) {
+      logout();
+      setCurrentUser(null);
+      setResume(null);
+    }
+  };
+
+  // Save changes to SQLite for the authenticated user
   const handleSave = async (dataToSave = resume) => {
-    if (!dataToSave) return;
+    if (!dataToSave || !currentUser) return;
     try {
       setIsSaving(true);
       const saved = await saveResume({
@@ -54,13 +109,15 @@ function App() {
     }
   };
 
-  // Switch language
+  // Switch language and update active theme for that language
   const handleLanguageChange = (lang) => {
     setActiveLanguage(lang);
     if (resume) {
+      const langTheme = resume.themes?.[lang] || resume.theme;
       setResume({
         ...resume,
-        activeLanguage: lang
+        activeLanguage: lang,
+        theme: langTheme
       });
     }
   };
@@ -70,7 +127,10 @@ function App() {
     if (!resume) return;
     try {
       setIsExporting(true);
-      const name = resume.translations?.[activeLanguage]?.personalInfo?.fullName || 'Henrique_Teixeira';
+      const name =
+        resume.translations?.[activeLanguage]?.personalInfo?.fullName ||
+        currentUser?.name ||
+        'Curriculo';
       const cleanName = name.trim().replace(/\s+/g, '_');
       const filename = `Curriculo_${cleanName}_${activeLanguage.toUpperCase()}.pdf`;
       await exportToPdf('resume-a4-page', filename);
@@ -86,9 +146,13 @@ function App() {
     printResume();
   };
 
-  // Reset to original Henrique Teixeira data
+  // Reset to original data for the authenticated user
   const handleReset = async () => {
-    if (window.confirm('Tem certeza que deseja restaurar os dados originais do Henrique Teixeira a partir do banco de dados SQLite?')) {
+    if (
+      window.confirm(
+        'Tem certeza que deseja restaurar as informações originais do seu currículo a partir do banco de dados SQLite?'
+      )
+    ) {
       try {
         setLoading(true);
         const defaultData = await resetResume();
@@ -102,12 +166,30 @@ function App() {
     }
   };
 
-  if (loading) {
+  // Initial session verification loader
+  if (authChecking) {
     return (
-      <div className="h-screen w-screen flex flex-col items-center justify-center bg-slate-900 text-white gap-3">
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-slate-900 text-white gap-3 select-none">
+        <Loader2 className="w-9 h-9 animate-spin text-blue-500" />
+        <p className="text-sm font-medium text-slate-300">
+          Verificando credenciais no navegador...
+        </p>
+      </div>
+    );
+  }
+
+  // Not logged in -> Show Login / Register Screen
+  if (!currentUser) {
+    return <AuthScreen onLoginSuccess={handleLoginSuccess} />;
+  }
+
+  // Loading resume data
+  if (loading || !resume) {
+    return (
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-slate-900 text-white gap-3 select-none">
         <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
         <p className="text-sm font-medium text-slate-300">
-          Carregando currículo do banco SQLite...
+          Carregando seu currículo do banco SQLite...
         </p>
       </div>
     );
@@ -129,6 +211,9 @@ function App() {
         onZoomChange={setZoom}
         showEditor={showEditor}
         onToggleEditor={() => setShowEditor(!showEditor)}
+        currentUser={currentUser}
+        onLogout={handleLogout}
+        onOpenChangePassword={() => setShowChangePasswordModal(true)}
       />
 
       {/* MAIN WORKSPACE: EDITOR ON LEFT, PREVIEW ON RIGHT */}
@@ -156,6 +241,12 @@ function App() {
           />
         </div>
       </div>
+
+      {/* CHANGE PASSWORD MODAL */}
+      <ChangePasswordModal
+        isOpen={showChangePasswordModal}
+        onClose={() => setShowChangePasswordModal(false)}
+      />
     </div>
   );
 }

@@ -3,7 +3,17 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
-const { getResumeData, updateResumeData, resetToDefault, savePhotoToDb, getPhotoFromDb } = require('./db');
+const {
+  createUser,
+  authenticateUser,
+  getUserByUuid,
+  changeUserPassword,
+  getResumeByUserUuid,
+  updateResumeByUserUuid,
+  resetResumeByUserUuid,
+  savePhotoToDb,
+  getPhotoFromDb
+} = require('./db');
 const { translateResumeData } = require('./translator');
 
 const app = express();
@@ -34,17 +44,93 @@ const upload = multer({
   }
 });
 
+// Middleware to authenticate user by user_uuid stored in browser header
+function requireAuth(req, res, next) {
+  const userUuid = req.headers['x-user-uuid'] || req.query.userUuid;
+  if (!userUuid) {
+    return res.status(401).json({ error: 'Não autorizado. Faça login para acessar o currículo.' });
+  }
+
+  const user = getUserByUuid(userUuid);
+  if (!user) {
+    return res.status(401).json({ error: 'Sessão inválida ou usuário não encontrado.' });
+  }
+
+  req.user = user;
+  next();
+}
+
 // Routes
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Get current resume
-app.get('/api/resume', (req, res) => {
+// ---------------- AUTH ROUTES ----------------
+
+// Register a new user with their isolated resume
+app.post('/api/auth/register', (req, res) => {
   try {
-    const resume = getResumeData('default');
+    const { name, email, password } = req.body;
+    const user = createUser({ name, email, password });
+    res.status(201).json({
+      success: true,
+      user
+    });
+  } catch (err) {
+    console.error('Erro no cadastro:', err.message);
+    res.status(400).json({ error: err.message || 'Erro ao registrar usuário' });
+  }
+});
+
+// Login user and return user info with UUID
+app.post('/api/auth/login', (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = authenticateUser(email, password);
+    if (!user) {
+      return res.status(401).json({ error: 'E-mail ou senha incorretos' });
+    }
+    res.json({
+      success: true,
+      user
+    });
+  } catch (err) {
+    console.error('Erro no login:', err);
+    res.status(500).json({ error: 'Falha interna durante autenticação' });
+  }
+});
+
+// Validate session and get current user data by UUID
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({
+    success: true,
+    user: req.user
+  });
+});
+
+// Change password for current authenticated user
+app.post('/api/auth/change-password', requireAuth, (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    changeUserPassword(req.user.uuid, currentPassword, newPassword);
+    res.json({
+      success: true,
+      message: 'Senha alterada com sucesso!'
+    });
+  } catch (err) {
+    console.error('Erro ao alterar senha:', err.message);
+    res.status(400).json({ error: err.message || 'Falha ao alterar senha' });
+  }
+});
+
+// ---------------- RESUME ROUTES (ISOLATED BY USER) ----------------
+
+// Get resume for current authenticated user
+app.get('/api/resume', requireAuth, (req, res) => {
+  try {
+    const resume = getResumeByUserUuid(req.user.uuid);
     if (!resume) {
-      return res.status(404).json({ error: 'Currículo não encontrado' });
+      return res.status(404).json({ error: 'Currículo não encontrado para este usuário' });
     }
     res.json(resume);
   } catch (err) {
@@ -53,11 +139,11 @@ app.get('/api/resume', (req, res) => {
   }
 });
 
-// Update resume
-app.put('/api/resume', (req, res) => {
+// Update resume for current authenticated user
+app.put('/api/resume', requireAuth, (req, res) => {
   try {
     const data = req.body;
-    const updated = updateResumeData('default', data);
+    const updated = updateResumeByUserUuid(req.user.uuid, data);
     res.json({ success: true, resume: updated });
   } catch (err) {
     console.error('Erro ao atualizar currículo:', err);
@@ -65,8 +151,19 @@ app.put('/api/resume', (req, res) => {
   }
 });
 
+// Reset resume to default template for current authenticated user
+app.post('/api/reset', requireAuth, (req, res) => {
+  try {
+    const resetData = resetResumeByUserUuid(req.user.uuid);
+    res.json({ success: true, resume: resetData });
+  } catch (err) {
+    console.error('Erro ao restaurar padrão:', err);
+    res.status(500).json({ error: 'Falha ao restaurar dados padrão' });
+  }
+});
+
 // Translate resume content
-app.post('/api/translate-resume', async (req, res) => {
+app.post('/api/translate-resume', requireAuth, async (req, res) => {
   try {
     const { sourceData, from = 'pt', to = 'en' } = req.body;
     if (!sourceData) {
@@ -80,8 +177,8 @@ app.post('/api/translate-resume', async (req, res) => {
   }
 });
 
-// Upload profile photo directly to SQLite database
-app.post('/api/upload-photo', upload.single('photo'), (req, res) => {
+// Upload profile photo directly to SQLite database for current user
+app.post('/api/upload-photo', requireAuth, upload.single('photo'), (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'Nenhum arquivo enviado' });
@@ -89,8 +186,8 @@ app.post('/api/upload-photo', upload.single('photo'), (req, res) => {
     const mimeType = req.file.mimetype || 'image/png';
     const dataUrl = `data:${mimeType};base64,${req.file.buffer.toString('base64')}`;
 
-    // Store in SQLite database
-    const photoId = savePhotoToDb(req.file.originalname || 'avatar.png', mimeType, dataUrl);
+    // Store in SQLite database with user reference
+    const photoId = savePhotoToDb(req.file.originalname || 'avatar.png', mimeType, dataUrl, req.user.uuid);
 
     res.json({
       success: true,
@@ -120,17 +217,6 @@ app.get('/api/photo/:id', (req, res) => {
   }
 });
 
-// Reset to default
-app.post('/api/reset', (req, res) => {
-  try {
-    const defaultData = resetToDefault('default');
-    res.json({ success: true, resume: defaultData });
-  } catch (err) {
-    console.error('Erro ao restaurar padrão:', err);
-    res.status(500).json({ error: 'Falha ao restaurar dados padrão' });
-  }
-});
-
 // Serve frontend build if exists
 const clientDist = path.join(__dirname, '..', 'client', 'dist');
 if (fs.existsSync(clientDist)) {
@@ -146,5 +232,3 @@ if (fs.existsSync(clientDist)) {
 app.listen(PORT, () => {
   console.log(`Backend server running on http://localhost:${PORT}`);
 });
-
-
