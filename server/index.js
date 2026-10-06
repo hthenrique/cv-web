@@ -263,6 +263,10 @@ if (fs.existsSync(clientDist)) {
   });
 }
 
-app.listen(PORT, HOST, () => {
-  console.log(`Backend server running on http://${HOST}:${PORT}`);
-});
+if (!process.env.VERCEL && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  app.listen(PORT, HOST, () => {
+    console.log(`Backend server running on http://${HOST}:${PORT}`);
+  });
+}
+
+module.exports = app;

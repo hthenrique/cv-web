@@ -3,11 +3,33 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
-const dbPath = path.join(__dirname, 'curriculo.db');
+// Detect serverless environment (Vercel / AWS Lambda) where only /tmp is writable
+const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const dbDir = isServerless ? '/tmp' : __dirname;
+const dbPath = path.join(dbDir, 'curriculo.db');
+
+// If running in serverless and /tmp/curriculo.db does not exist, copy existing db if available
+if (isServerless && !fs.existsSync(dbPath)) {
+  const seedFile = path.join(__dirname, 'curriculo.db');
+  if (fs.existsSync(seedFile)) {
+    try {
+      fs.copyFileSync(seedFile, dbPath);
+    } catch (_) {}
+  }
+}
+
 const db = new Database(dbPath);
 
-// Enable WAL mode for better concurrency
-db.pragma('journal_mode = WAL');
+// Enable WAL mode only locally (WAL mode requires -shm and -wal locks that can fail in serverless)
+if (!isServerless) {
+  try {
+    db.pragma('journal_mode = WAL');
+  } catch (_) {}
+} else {
+  try {
+    db.pragma('journal_mode = DELETE');
+  } catch (_) {}
+}
 
 // Initialize base tables
 db.exec(`

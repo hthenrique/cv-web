@@ -23,7 +23,8 @@ function resolveApiBase() {
     }
   }
 
-  return '/api';
+  // Production fallback if VITE_API_URL is not set on Vercel
+  return 'https://server-mu-sooty.vercel.app/api';
 }
 
 export const API_BASE = resolveApiBase();
