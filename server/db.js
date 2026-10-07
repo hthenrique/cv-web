@@ -538,17 +538,12 @@ function getStarterDataForUser(name, email, lang = 'pt') {
 
 // Seed function for Henrique Teixeira demo user and database setup
 function seedDatabase() {
-  const isProduction = process.env.NODE_ENV === 'production';
   const defaultHenriqueEmail = 'ht.henrique@live.com';
   let henrique = db.prepare('SELECT * FROM users WHERE email = ?').get(defaultHenriqueEmail);
 
   if (!henrique) {
-    if (isProduction) {
-      console.log('Ambiente de produção: nenhum usuário de teste criado automaticamente.');
-      return;
-    }
     console.log('Criando usuário padrão Henrique Teixeira no SQLite...');
-    const henriqueUuid = crypto.randomUUID();
+    const henriqueUuid = '9fc30d86-0886-4734-ab91-f4fb43424c63';
     const { hash, salt } = hashPassword('123456');
 
     const insertUser = db.prepare(`
