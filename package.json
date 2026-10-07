@@ -9,13 +9,19 @@
     "start": "node server/index.js"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "better-sqlite3": "^13.0.3",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "multer": "^2.3.0"
   },
-  "keywords": ["resume", "curriculo", "sqlite", "react", "tailwind"],
+  "keywords": [
+    "resume",
+    "curriculo",
+    "sqlite",
+    "react",
+    "tailwind"
+  ],
   "author": "Henrique Teixeira",
   "license": "MIT"
 }
-

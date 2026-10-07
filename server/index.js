@@ -4,8 +4,9 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const {
-  db,
-  dbPath,
+  client,
+  isTurso,
+  tursoUrl,
   createUser,
   authenticateUser,
   getUserByUuid,
@@ -86,48 +87,51 @@ const upload = multer({
 });
 
 // Middleware to authenticate user by user_uuid stored in browser header
-function requireAuth(req, res, next) {
-  const userUuid = req.headers['x-user-uuid'] || req.query.userUuid;
-  if (!userUuid) {
-    return res.status(401).json({ error: 'Não autorizado. Faça login para acessar o currículo.' });
-  }
+async function requireAuth(req, res, next) {
+  try {
+    const userUuid = req.headers['x-user-uuid'] || req.query.userUuid;
+    if (!userUuid) {
+      return res.status(401).json({ error: 'Não autorizado. Faça login para acessar o currículo.' });
+    }
 
-  const user = getUserByUuid(userUuid);
-  if (!user) {
-    return res.status(401).json({ error: 'Sessão inválida ou usuário não encontrado.' });
-  }
+    const user = await getUserByUuid(userUuid);
+    if (!user) {
+      return res.status(401).json({ error: 'Sessão inválida ou usuário não encontrado.' });
+    }
 
-  req.user = user;
-  next();
+    req.user = user;
+    next();
+  } catch (err) {
+    console.error('Erro na autenticação:', err);
+    res.status(500).json({ error: 'Falha interna ao verificar sessão' });
+  }
 }
 
 // Routes
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    database: isTurso ? 'Turso Cloud (LibSQL)' : 'Local SQLite',
+    timestamp: new Date().toISOString()
+  });
 });
 
-// Admin / Inspection routes to view and download SQLite database contents
-app.get('/api/admin/db-download', (req, res) => {
+// Admin / Inspection routes to view database contents
+app.get('/api/admin/db-inspect', async (req, res) => {
   try {
-    if (!fs.existsSync(dbPath)) {
-      return res.status(404).send('Arquivo SQLite curriculo.db não encontrado no servidor.');
-    }
-    res.download(dbPath, 'curriculo.db');
-  } catch (err) {
-    res.status(500).json({ error: 'Erro ao baixar arquivo do banco', message: err.message });
-  }
-});
+    const usersRes = await client.execute('SELECT id, uuid, name, email, created_at, updated_at FROM users');
+    const resumesRes = await client.execute('SELECT id, user_id, user_uuid, slug, title, active_language, photo_url, created_at, updated_at FROM resumes');
+    const transRes = await client.execute('SELECT id, resume_id, language, length(personal_info) as personal_info_size, length(summary) as summary_size, length(experiences) as experiences_size, length(skills) as skills_size FROM resume_translations');
+    const photosRes = await client.execute('SELECT id, user_uuid, filename, mime_type, length(data_base64) as data_size_bytes, created_at FROM photos');
 
-app.get('/api/admin/db-inspect', (req, res) => {
-  try {
-    const users = db.prepare('SELECT id, uuid, name, email, created_at, updated_at FROM users').all();
-    const resumes = db.prepare('SELECT id, user_id, user_uuid, slug, title, active_language, photo_url, created_at, updated_at FROM resumes').all();
-    const translations = db.prepare('SELECT id, resume_id, language, length(personal_info) as personal_info_size, length(summary) as summary_size, length(experiences) as experiences_size, length(skills) as skills_size FROM resume_translations').all();
-    const photos = db.prepare('SELECT id, user_uuid, filename, mime_type, length(data_base64) as data_size_bytes, created_at FROM photos').all();
+    const users = usersRes.rows;
+    const resumes = resumesRes.rows;
+    const translations = transRes.rows;
+    const photos = photosRes.rows;
 
     const dbStats = {
-      dbPath,
-      fileSizeBytes: fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0,
+      engine: isTurso ? 'Turso Cloud (LibSQL)' : 'Local SQLite',
+      url: isTurso ? tursoUrl : 'local file (curriculo.db)',
       timestamp: new Date().toISOString(),
       counts: {
         users: users.length,
@@ -172,7 +176,7 @@ app.get('/api/admin/db-inspect', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SQLite Inspector - Vercel Database</title>
+  <title>Turso Database Inspector - Produção</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -189,6 +193,7 @@ app.get('/api/admin/db-inspect', (req, res) => {
     header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 1.5rem; }
     h1 { font-size: 1.75rem; font-weight: 700; color: #fff; }
     .badge { background: #0369a1; color: #bae6fd; font-size: 0.8rem; font-weight: 600; padding: 0.25rem 0.6rem; border-radius: 9999px; margin-left: 0.5rem; }
+    .badge-turso { background: #065f46; color: #a7f3d0; font-size: 0.8rem; font-weight: 600; padding: 0.25rem 0.6rem; border-radius: 9999px; margin-left: 0.5rem; }
     .btn { display: inline-flex; align-items: center; gap: 0.5rem; background: var(--primary); color: #0f172a; text-decoration: none; font-weight: 600; font-size: 0.875rem; padding: 0.6rem 1.2rem; border-radius: 0.5rem; transition: opacity 0.2s; }
     .btn:hover { opacity: 0.9; }
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
@@ -211,12 +216,12 @@ app.get('/api/admin/db-inspect', (req, res) => {
   <div class="container">
     <header>
       <div>
-        <h1>Visualizador do SQLite <span class="badge">PRODUÇÃO</span></h1>
-        <p style="color: var(--text-muted); font-size: 0.875rem; margin-top: 0.25rem;">Arquivo: <code>${dbPath}</code> (${(dbStats.fileSizeBytes / 1024).toFixed(1)} KB)</p>
+        <h1>Visualizador do Banco de Dados <span class="${isTurso ? 'badge-turso' : 'badge'}">${isTurso ? 'TURSO CLOUD' : 'SQLITE LOCAL'}</span></h1>
+        <p style="color: var(--text-muted); font-size: 0.875rem; margin-top: 0.25rem;">Conexão: <code>${dbStats.url}</code></p>
       </div>
       <div style="display: flex; gap: 0.5rem;">
         <a href="/api/admin/db-inspect?format=json" class="btn" style="background: #334155; color: #f8fafc;" target="_blank">Ver JSON</a>
-        <a href="/api/admin/db-download" class="btn">📥 Baixar curriculo.db</a>
+        ${isTurso ? '<a href="https://turso.tech/app" target="_blank" class="btn" style="background: #047857; color: #fff;">Painel Turso Console ↗</a>' : ''}
       </div>
     </header>
 
@@ -245,7 +250,7 @@ app.get('/api/admin/db-inspect', (req, res) => {
     ${renderTable('Tabela: photos (Fotos no Banco)', ['id', 'user_uuid', 'filename', 'mime_type', 'data_size_bytes', 'created_at'], photos)}
 
     <div class="footer">
-      Currículo Web App • Instância SQLite • ${new Date().toLocaleString('pt-BR')}
+      Currículo Web App • Banco Permanente • ${new Date().toLocaleString('pt-BR')}
     </div>
   </div>
 </body>
@@ -254,18 +259,18 @@ app.get('/api/admin/db-inspect', (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(html);
   } catch (err) {
-    console.error('Erro ao inspecionar banco SQLite:', err);
-    res.status(500).json({ error: 'Erro ao inspecionar SQLite', message: err.message, stack: err.stack });
+    console.error('Erro ao inspecionar banco Turso/SQLite:', err);
+    res.status(500).json({ error: 'Erro ao inspecionar banco', message: err.message, stack: err.stack });
   }
 });
 
 // ---------------- AUTH ROUTES ----------------
 
 // Register a new user with their isolated resume
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password } = req.body;
-    const user = createUser({ name, email, password });
+    const user = await createUser({ name, email, password });
     res.status(201).json({
       success: true,
       user
@@ -277,10 +282,10 @@ app.post('/api/auth/register', (req, res) => {
 });
 
 // Login user and return user info with UUID
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = authenticateUser(email, password);
+    const user = await authenticateUser(email, password);
     if (!user) {
       return res.status(401).json({ error: 'E-mail ou senha incorretos' });
     }
@@ -303,10 +308,10 @@ app.get('/api/auth/me', requireAuth, (req, res) => {
 });
 
 // Change password for current authenticated user
-app.post('/api/auth/change-password', requireAuth, (req, res) => {
+app.post('/api/auth/change-password', requireAuth, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
-    changeUserPassword(req.user.uuid, currentPassword, newPassword);
+    await changeUserPassword(req.user.uuid, currentPassword, newPassword);
     res.json({
       success: true,
       message: 'Senha alterada com sucesso!'
@@ -320,35 +325,35 @@ app.post('/api/auth/change-password', requireAuth, (req, res) => {
 // ---------------- RESUME ROUTES (ISOLATED BY USER) ----------------
 
 // Get resume for current authenticated user
-app.get('/api/resume', requireAuth, (req, res) => {
+app.get('/api/resume', requireAuth, async (req, res) => {
   try {
-    const resume = getResumeByUserUuid(req.user.uuid);
+    const resume = await getResumeByUserUuid(req.user.uuid);
     if (!resume) {
       return res.status(404).json({ error: 'Currículo não encontrado para este usuário' });
     }
     res.json(resume);
   } catch (err) {
     console.error('Erro ao buscar currículo:', err);
-    res.status(500).json({ error: 'Erro ao buscar currículo no SQLite' });
+    res.status(500).json({ error: 'Erro ao buscar currículo no banco de dados' });
   }
 });
 
 // Update resume for current authenticated user
-app.put('/api/resume', requireAuth, (req, res) => {
+app.put('/api/resume', requireAuth, async (req, res) => {
   try {
     const data = req.body;
-    const updated = updateResumeByUserUuid(req.user.uuid, data);
+    const updated = await updateResumeByUserUuid(req.user.uuid, data);
     res.json({ success: true, resume: updated });
   } catch (err) {
     console.error('Erro ao atualizar currículo:', err);
-    res.status(500).json({ error: 'Erro ao atualizar currículo no SQLite' });
+    res.status(500).json({ error: 'Erro ao atualizar currículo no banco de dados' });
   }
 });
 
 // Reset resume to default template for current authenticated user
-app.post('/api/reset', requireAuth, (req, res) => {
+app.post('/api/reset', requireAuth, async (req, res) => {
   try {
-    const resetData = resetResumeByUserUuid(req.user.uuid);
+    const resetData = await resetResumeByUserUuid(req.user.uuid);
     res.json({ success: true, resume: resetData });
   } catch (err) {
     console.error('Erro ao restaurar padrão:', err);
@@ -371,8 +376,8 @@ app.post('/api/translate-resume', requireAuth, async (req, res) => {
   }
 });
 
-// Upload profile photo directly to SQLite database for current user
-app.post('/api/upload-photo', requireAuth, upload.single('photo'), (req, res) => {
+// Upload profile photo directly to database for current user
+app.post('/api/upload-photo', requireAuth, upload.single('photo'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'Nenhum arquivo enviado' });
@@ -380,8 +385,8 @@ app.post('/api/upload-photo', requireAuth, upload.single('photo'), (req, res) =>
     const mimeType = req.file.mimetype || 'image/png';
     const dataUrl = `data:${mimeType};base64,${req.file.buffer.toString('base64')}`;
 
-    // Store in SQLite database with user reference
-    const photoId = savePhotoToDb(req.file.originalname || 'avatar.png', mimeType, dataUrl, req.user.uuid);
+    // Store in database with user reference
+    const photoId = await savePhotoToDb(req.file.originalname || 'avatar.png', mimeType, dataUrl, req.user.uuid);
 
     res.json({
       success: true,
@@ -389,15 +394,15 @@ app.post('/api/upload-photo', requireAuth, upload.single('photo'), (req, res) =>
       photoId
     });
   } catch (err) {
-    console.error('Erro ao salvar foto no SQLite:', err);
-    res.status(500).json({ error: 'Falha ao salvar foto no banco de dados SQLite' });
+    console.error('Erro ao salvar foto no banco:', err);
+    res.status(500).json({ error: 'Falha ao salvar foto no banco de dados' });
   }
 });
 
-// Retrieve photo from SQLite database
-app.get('/api/photo/:id', (req, res) => {
+// Retrieve photo from database
+app.get('/api/photo/:id', async (req, res) => {
   try {
-    const photo = getPhotoFromDb(req.params.id);
+    const photo = await getPhotoFromDb(req.params.id);
     if (!photo) {
       return res.status(404).send('Foto não encontrada no banco de dados');
     }
@@ -406,7 +411,7 @@ app.get('/api/photo/:id', (req, res) => {
     res.setHeader('Content-Type', photo.mime_type || 'image/png');
     res.send(imgBuffer);
   } catch (err) {
-    console.error('Erro ao buscar foto do SQLite:', err);
+    console.error('Erro ao buscar foto do banco:', err);
     res.status(500).send('Erro ao recuperar foto do banco de dados');
   }
 });

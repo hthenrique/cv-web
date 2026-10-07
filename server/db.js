@@ -1,113 +1,39 @@
-const Database = require('better-sqlite3');
+const { createClient } = require('@libsql/client');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const os = require('os');
 
-// Detect serverless environment (Vercel / AWS Lambda) where only tmp is writable
-const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
-const dbDir = isServerless ? (process.platform === 'win32' ? os.tmpdir() : '/tmp') : __dirname;
-if (isServerless && !fs.existsSync(dbDir)) {
-  try {
-    fs.mkdirSync(dbDir, { recursive: true });
-  } catch (_) {}
-}
-const dbPath = path.join(dbDir, 'curriculo.db');
-
-// If running in serverless and curriculo.db does not exist, copy existing db if available
-if (isServerless && !fs.existsSync(dbPath)) {
-  const seedFile = path.join(__dirname, 'curriculo.db');
-  if (fs.existsSync(seedFile)) {
+// Load environment variables if present (.env in server or root)
+const envPaths = [path.join(__dirname, '.env'), path.join(__dirname, '..', '.env')];
+for (const envPath of envPaths) {
+  if (fs.existsSync(envPath)) {
     try {
-      fs.copyFileSync(seedFile, dbPath);
+      const envLines = fs.readFileSync(envPath, 'utf8').split('\n');
+      for (const line of envLines) {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
+          const idx = trimmed.indexOf('=');
+          const k = trimmed.slice(0, idx).trim();
+          const v = trimmed.slice(idx + 1).trim().replace(/^["']|["']$/g, '');
+          if (!process.env[k]) process.env[k] = v;
+        }
+      }
     } catch (_) {}
   }
 }
 
-const db = new Database(dbPath);
+// Detect Turso Cloud credentials vs local SQLite fallback
+const tursoUrl = (process.env.TURSO_DATABASE_URL || '').trim();
+const tursoAuthToken = (process.env.TURSO_AUTH_TOKEN || '').trim();
+const isTurso = Boolean(tursoUrl);
 
-// Enable WAL mode only locally (WAL mode requires -shm and -wal locks that can fail in serverless)
-if (!isServerless) {
-  try {
-    db.pragma('journal_mode = WAL');
-  } catch (_) {}
-} else {
-  try {
-    db.pragma('journal_mode = DELETE');
-  } catch (_) {}
-}
+const localDbPath = path.join(__dirname, 'curriculo.db');
 
-// Initialize base tables
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    uuid TEXT UNIQUE NOT NULL,
-    name TEXT NOT NULL,
-    email TEXT UNIQUE NOT NULL COLLATE NOCASE,
-    password_hash TEXT NOT NULL,
-    salt TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS resumes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    user_uuid TEXT,
-    slug TEXT UNIQUE DEFAULT 'default',
-    title TEXT DEFAULT 'Meu Currículo',
-    active_language TEXT DEFAULT 'pt',
-    photo_url TEXT DEFAULT NULL,
-    theme_config TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS resume_translations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    resume_id INTEGER NOT NULL,
-    language TEXT NOT NULL,
-    personal_info TEXT,
-    summary TEXT,
-    experiences TEXT,
-    education TEXT,
-    skills TEXT,
-    languages TEXT,
-    custom_sections TEXT,
-    FOREIGN KEY (resume_id) REFERENCES resumes(id) ON DELETE CASCADE,
-    UNIQUE(resume_id, language)
-  );
-
-  CREATE TABLE IF NOT EXISTS photos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_uuid TEXT,
-    filename TEXT,
-    mime_type TEXT,
-    data_base64 TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`);
-
-// Run migrations on existing SQLite database if columns are missing
-try {
-  const resumeCols = db.prepare('PRAGMA table_info(resumes)').all().map((c) => c.name);
-  if (!resumeCols.includes('user_id')) {
-    db.exec('ALTER TABLE resumes ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;');
-  }
-  if (!resumeCols.includes('user_uuid')) {
-    db.exec('ALTER TABLE resumes ADD COLUMN user_uuid TEXT;');
-  }
-  db.exec('CREATE INDEX IF NOT EXISTS idx_resumes_user_uuid ON resumes(user_uuid);');
-  db.exec('CREATE INDEX IF NOT EXISTS idx_resumes_user_id ON resumes(user_id);');
-
-  const photoCols = db.prepare('PRAGMA table_info(photos)').all().map((c) => c.name);
-  if (!photoCols.includes('user_uuid')) {
-    db.exec('ALTER TABLE photos ADD COLUMN user_uuid TEXT;');
-  }
-} catch (e) {
-  console.warn('Nota de migração do banco SQLite:', e.message);
-}
+// Client instance (supports Turso Cloud over HTTP or local SQLite file)
+const client = createClient({
+  url: isTurso ? tursoUrl : ('file:' + localDbPath),
+  authToken: isTurso ? tursoAuthToken : undefined
+});
 
 // Password hashing functions
 function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
@@ -123,6 +49,7 @@ function verifyPassword(password, hash, salt) {
     return false;
   }
 }
+
 
 // Default Henrique Teixeira data
 // Default themes per language
@@ -536,31 +463,108 @@ function getStarterDataForUser(name, email, lang = 'pt') {
   };
 }
 
+// ----------------- DATABASE INITIALIZATION & MIGRATIONS -----------------
+
+let initPromise = null;
+function initDatabase() {
+  if (!initPromise) {
+    initPromise = (async () => {
+      // 1. Create tables if not exist
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          uuid TEXT UNIQUE NOT NULL,
+          name TEXT NOT NULL,
+          email TEXT UNIQUE NOT NULL COLLATE NOCASE,
+          password_hash TEXT NOT NULL,
+          salt TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS resumes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER,
+          user_uuid TEXT,
+          slug TEXT UNIQUE DEFAULT 'default',
+          title TEXT DEFAULT 'Meu Currículo',
+          active_language TEXT DEFAULT 'pt',
+          photo_url TEXT DEFAULT NULL,
+          theme_config TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+      `);
+
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS resume_translations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          resume_id INTEGER NOT NULL,
+          language TEXT NOT NULL,
+          personal_info TEXT,
+          summary TEXT,
+          experiences TEXT,
+          education TEXT,
+          skills TEXT,
+          languages TEXT,
+          custom_sections TEXT,
+          FOREIGN KEY (resume_id) REFERENCES resumes(id) ON DELETE CASCADE,
+          UNIQUE(resume_id, language)
+        );
+      `);
+
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS photos (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_uuid TEXT,
+          filename TEXT,
+          mime_type TEXT,
+          data_base64 TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+
+      try {
+        await client.execute('CREATE INDEX IF NOT EXISTS idx_resumes_user_uuid ON resumes(user_uuid);');
+        await client.execute('CREATE INDEX IF NOT EXISTS idx_resumes_user_id ON resumes(user_id);');
+      } catch (_) {}
+
+      // 2. Seed default database user & resume
+      await seedDatabase();
+    })().catch((err) => {
+      console.error('Falha ao inicializar o banco de dados:', err);
+      initPromise = null; // allow retry on next request
+      throw err;
+    });
+  }
+  return initPromise;
+}
+
 // Seed function for Henrique Teixeira demo user and database setup
-function seedDatabase() {
+async function seedDatabase() {
   const defaultHenriqueEmail = 'ht.henrique@live.com';
-  let henrique = db.prepare('SELECT * FROM users WHERE email = ?').get(defaultHenriqueEmail);
+  const userCheck = await client.execute({
+    sql: 'SELECT * FROM users WHERE email = ?',
+    args: [defaultHenriqueEmail]
+  });
+
+  let henrique = userCheck.rows[0];
 
   if (!henrique) {
-    console.log('Criando usuário padrão Henrique Teixeira no SQLite...');
+    console.log('Criando usuário padrão Henrique Teixeira no Turso / SQLite...');
     const henriqueUuid = '9fc30d86-0886-4734-ab91-f4fb43424c63';
     const { hash, salt } = hashPassword('123456');
 
-    const insertUser = db.prepare(`
-      INSERT INTO users (uuid, name, email, password_hash, salt)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-
-    const userResult = insertUser.run(
-      henriqueUuid,
-      'Henrique Teixeira',
-      defaultHenriqueEmail,
-      hash,
-      salt
-    );
+    const insertUserRes = await client.execute({
+      sql: `INSERT INTO users (uuid, name, email, password_hash, salt) VALUES (?, ?, ?, ?, ?)`,
+      args: [henriqueUuid, 'Henrique Teixeira', defaultHenriqueEmail, hash, salt]
+    });
 
     henrique = {
-      id: userResult.lastInsertRowid,
+      id: Number(insertUserRes.lastInsertRowid),
       uuid: henriqueUuid,
       name: 'Henrique Teixeira',
       email: defaultHenriqueEmail
@@ -569,28 +573,19 @@ function seedDatabase() {
   }
 
   // Check if Henrique has a resume linked
-  let resume = db.prepare('SELECT * FROM resumes WHERE user_uuid = ? OR user_id = ?').get(henrique.uuid, henrique.id);
+  const resumeCheck = await client.execute({
+    sql: 'SELECT * FROM resumes WHERE user_uuid = ? OR user_id = ?',
+    args: [henrique.uuid, henrique.id]
+  });
+
+  let resume = resumeCheck.rows[0];
 
   if (!resume) {
-    // Check if an existing unassigned resume exists
-    const legacyResume = db.prepare('SELECT * FROM resumes WHERE user_uuid IS NULL LIMIT 1').get();
-
-    if (legacyResume) {
-      console.log('Vinculando currículo existente ao usuário Henrique...');
-      db.prepare('UPDATE resumes SET user_id = ?, user_uuid = ? WHERE id = ?').run(
-        henrique.id,
-        henrique.uuid,
-        legacyResume.id
-      );
-      resume = legacyResume;
-    } else {
-      console.log('Criando currículo inicial para Henrique...');
-      const insertResume = db.prepare(`
-        INSERT INTO resumes (user_id, user_uuid, slug, title, active_language, photo_url, theme_config)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `);
-
-      const result = insertResume.run(
+    console.log('Criando currículo inicial para Henrique no Turso / SQLite...');
+    const insertResumeRes = await client.execute({
+      sql: `INSERT INTO resumes (user_id, user_uuid, slug, title, active_language, photo_url, theme_config)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: [
         henrique.id,
         henrique.uuid,
         'default',
@@ -598,18 +593,17 @@ function seedDatabase() {
         'pt',
         null,
         JSON.stringify(defaultTheme)
-      );
+      ]
+    });
 
-      const resumeId = result.lastInsertRowid;
+    const resumeId = Number(insertResumeRes.lastInsertRowid);
 
-      const insertTrans = db.prepare(`
-        INSERT INTO resume_translations 
-        (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-
-      // PT
-      insertTrans.run(
+    // PT translation
+    await client.execute({
+      sql: `INSERT INTO resume_translations 
+            (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
         resumeId,
         'pt',
         JSON.stringify(defaultPortuguese.personalInfo),
@@ -619,10 +613,15 @@ function seedDatabase() {
         JSON.stringify(defaultPortuguese.skills),
         JSON.stringify(defaultPortuguese.languages),
         JSON.stringify(defaultPortuguese.customSections)
-      );
+      ]
+    });
 
-      // EN
-      insertTrans.run(
+    // EN translation
+    await client.execute({
+      sql: `INSERT INTO resume_translations 
+            (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
         resumeId,
         'en',
         JSON.stringify(defaultEnglish.personalInfo),
@@ -632,18 +631,21 @@ function seedDatabase() {
         JSON.stringify(defaultEnglish.skills),
         JSON.stringify(defaultEnglish.languages),
         JSON.stringify(defaultEnglish.customSections)
-      );
+      ]
+    });
 
-      console.log('Currículo inicial criado com sucesso para Henrique, ID:', resumeId);
-    }
+    console.log('Currículo inicial criado com sucesso para Henrique, ID:', resumeId);
   }
 }
 
-seedDatabase();
+// Automatically trigger initialization in the background
+initDatabase().catch(() => {});
 
 // ----------------- USER AUTHENTICATION & MANAGEMENT -----------------
 
-function createUser({ name, email, password }) {
+async function createUser({ name, email, password }) {
+  await initDatabase();
+
   if (!name || typeof name !== 'string' || !name.trim()) {
     throw new Error('Nome é obrigatório.');
   }
@@ -657,72 +659,67 @@ function createUser({ name, email, password }) {
   const cleanName = name.trim();
   const cleanEmail = email.trim().toLowerCase();
 
-  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(cleanEmail);
-  if (existing) {
+  const existCheck = await client.execute({
+    sql: 'SELECT id FROM users WHERE email = ?',
+    args: [cleanEmail]
+  });
+  if (existCheck.rows.length > 0) {
     throw new Error('Este e-mail já está cadastrado no sistema.');
   }
 
   const userUuid = crypto.randomUUID();
   const { hash, salt } = hashPassword(password);
 
-  const insertUser = db.prepare(`
-    INSERT INTO users (uuid, name, email, password_hash, salt)
-    VALUES (?, ?, ?, ?, ?)
-  `);
-
-  const userRes = insertUser.run(userUuid, cleanName, cleanEmail, hash, salt);
-  const userId = userRes.lastInsertRowid;
+  const userRes = await client.execute({
+    sql: `INSERT INTO users (uuid, name, email, password_hash, salt) VALUES (?, ?, ?, ?, ?)`,
+    args: [userUuid, cleanName, cleanEmail, hash, salt]
+  });
+  const userId = Number(userRes.lastInsertRowid);
 
   // Automatically create resume for the new user
-  const insertResume = db.prepare(`
-    INSERT INTO resumes (user_id, user_uuid, slug, title, active_language, photo_url, theme_config)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const resumeRes = insertResume.run(
-    userId,
-    userUuid,
-    userUuid,
-    `Currículo de ${cleanName}`,
-    'pt',
-    null,
-    JSON.stringify(defaultTheme)
-  );
-
-  const resumeId = resumeRes.lastInsertRowid;
-
-  const insertTrans = db.prepare(`
-    INSERT INTO resume_translations 
-    (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+  const resumeRes = await client.execute({
+    sql: `INSERT INTO resumes (user_id, user_uuid, slug, title, active_language, photo_url, theme_config)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    args: [userId, userUuid, userUuid, `Currículo de ${cleanName}`, 'pt', null, JSON.stringify(defaultTheme)]
+  });
+  const resumeId = Number(resumeRes.lastInsertRowid);
 
   const starterPt = getStarterDataForUser(cleanName, cleanEmail, 'pt');
   const starterEn = getStarterDataForUser(cleanName, cleanEmail, 'en');
 
-  insertTrans.run(
-    resumeId,
-    'pt',
-    JSON.stringify(starterPt.personalInfo),
-    starterPt.summary,
-    JSON.stringify(starterPt.experiences),
-    JSON.stringify(starterPt.education),
-    JSON.stringify(starterPt.skills),
-    JSON.stringify(starterPt.languages),
-    JSON.stringify(starterPt.customSections)
-  );
+  await client.execute({
+    sql: `INSERT INTO resume_translations 
+          (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      resumeId,
+      'pt',
+      JSON.stringify(starterPt.personalInfo),
+      starterPt.summary,
+      JSON.stringify(starterPt.experiences),
+      JSON.stringify(starterPt.education),
+      JSON.stringify(starterPt.skills),
+      JSON.stringify(starterPt.languages),
+      JSON.stringify(starterPt.customSections)
+    ]
+  });
 
-  insertTrans.run(
-    resumeId,
-    'en',
-    JSON.stringify(starterEn.personalInfo),
-    starterEn.summary,
-    JSON.stringify(starterEn.experiences),
-    JSON.stringify(starterEn.education),
-    JSON.stringify(starterEn.skills),
-    JSON.stringify(starterEn.languages),
-    JSON.stringify(starterEn.customSections)
-  );
+  await client.execute({
+    sql: `INSERT INTO resume_translations 
+          (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      resumeId,
+      'en',
+      JSON.stringify(starterEn.personalInfo),
+      starterEn.summary,
+      JSON.stringify(starterEn.experiences),
+      JSON.stringify(starterEn.education),
+      JSON.stringify(starterEn.skills),
+      JSON.stringify(starterEn.languages),
+      JSON.stringify(starterEn.customSections)
+    ]
+  });
 
   return {
     id: userId,
@@ -732,11 +729,16 @@ function createUser({ name, email, password }) {
   };
 }
 
-function authenticateUser(email, password) {
+async function authenticateUser(email, password) {
+  await initDatabase();
   if (!email || !password) return null;
   const cleanEmail = email.trim().toLowerCase();
 
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(cleanEmail);
+  const userRes = await client.execute({
+    sql: 'SELECT * FROM users WHERE email = ?',
+    args: [cleanEmail]
+  });
+  const user = userRes.rows[0];
   if (!user) return null;
 
   const isValid = verifyPassword(password, user.password_hash, user.salt);
@@ -751,13 +753,18 @@ function authenticateUser(email, password) {
   };
 }
 
-function getUserByUuid(uuid) {
+async function getUserByUuid(uuid) {
+  await initDatabase();
   if (!uuid) return null;
-  const user = db.prepare('SELECT id, uuid, name, email, created_at FROM users WHERE uuid = ?').get(uuid);
-  return user || null;
+  const userRes = await client.execute({
+    sql: 'SELECT id, uuid, name, email, created_at FROM users WHERE uuid = ?',
+    args: [uuid]
+  });
+  return userRes.rows[0] || null;
 }
 
-function changeUserPassword(uuid, currentPassword, newPassword) {
+async function changeUserPassword(uuid, currentPassword, newPassword) {
+  await initDatabase();
   if (!uuid) throw new Error('Usuário não autenticado.');
   if (!currentPassword) throw new Error('Informe a senha atual.');
   if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 6) {
@@ -767,7 +774,11 @@ function changeUserPassword(uuid, currentPassword, newPassword) {
     throw new Error('A nova senha deve ser diferente da senha atual.');
   }
 
-  const user = db.prepare('SELECT * FROM users WHERE uuid = ?').get(uuid);
+  const userRes = await client.execute({
+    sql: 'SELECT * FROM users WHERE uuid = ?',
+    args: [uuid]
+  });
+  const user = userRes.rows[0];
   if (!user) throw new Error('Usuário não encontrado.');
 
   const isCurrentValid = verifyPassword(currentPassword, user.password_hash, user.salt);
@@ -777,95 +788,107 @@ function changeUserPassword(uuid, currentPassword, newPassword) {
 
   const { hash, salt } = hashPassword(newPassword);
 
-  db.prepare(`
-    UPDATE users 
-    SET password_hash = ?, salt = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE uuid = ?
-  `).run(hash, salt, uuid);
+  await client.execute({
+    sql: `UPDATE users 
+          SET password_hash = ?, salt = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE uuid = ?`,
+    args: [hash, salt, uuid]
+  });
 
   return true;
 }
 
 // ----------------- RESUME MANAGEMENT ISOLATED BY USER UUID -----------------
 
-function getResumeByUserUuid(userUuid) {
+async function getResumeByUserUuid(userUuid) {
+  await initDatabase();
   if (!userUuid) return null;
 
-  let resume = db.prepare('SELECT * FROM resumes WHERE user_uuid = ?').get(userUuid);
+  let res = await client.execute({
+    sql: 'SELECT * FROM resumes WHERE user_uuid = ?',
+    args: [userUuid]
+  });
+  let resume = res.rows[0];
 
   // If user exists but resume does not yet exist, create it
   if (!resume) {
-    const user = getUserByUuid(userUuid);
+    const user = await getUserByUuid(userUuid);
     if (!user) return null;
 
-    const insertResume = db.prepare(`
-      INSERT INTO resumes (user_id, user_uuid, slug, title, active_language, photo_url, theme_config)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
+    const insertRes = await client.execute({
+      sql: `INSERT INTO resumes (user_id, user_uuid, slug, title, active_language, photo_url, theme_config)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: [user.id, user.uuid, user.uuid, `Currículo de ${user.name}`, 'pt', null, JSON.stringify(defaultTheme)]
+    });
+    const resumeId = Number(insertRes.lastInsertRowid);
 
-    const res = insertResume.run(
-      user.id,
-      user.uuid,
-      user.uuid,
-      `Currículo de ${user.name}`,
-      'pt',
-      null,
-      JSON.stringify(defaultTheme)
-    );
-
-    const resumeId = res.lastInsertRowid;
     const starterPt = getStarterDataForUser(user.name, user.email, 'pt');
     const starterEn = getStarterDataForUser(user.name, user.email, 'en');
 
-    const insertTrans = db.prepare(`
-      INSERT INTO resume_translations 
-      (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    await client.execute({
+      sql: `INSERT INTO resume_translations 
+            (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        resumeId,
+        'pt',
+        JSON.stringify(starterPt.personalInfo),
+        starterPt.summary,
+        JSON.stringify(starterPt.experiences),
+        JSON.stringify(starterPt.education),
+        JSON.stringify(starterPt.skills),
+        JSON.stringify(starterPt.languages),
+        JSON.stringify(starterPt.customSections)
+      ]
+    });
 
-    insertTrans.run(
-      resumeId,
-      'pt',
-      JSON.stringify(starterPt.personalInfo),
-      starterPt.summary,
-      JSON.stringify(starterPt.experiences),
-      JSON.stringify(starterPt.education),
-      JSON.stringify(starterPt.skills),
-      JSON.stringify(starterPt.languages),
-      JSON.stringify(starterPt.customSections)
-    );
+    await client.execute({
+      sql: `INSERT INTO resume_translations 
+            (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        resumeId,
+        'en',
+        JSON.stringify(starterEn.personalInfo),
+        starterEn.summary,
+        JSON.stringify(starterEn.experiences),
+        JSON.stringify(starterEn.education),
+        JSON.stringify(starterEn.skills),
+        JSON.stringify(starterEn.languages),
+        JSON.stringify(starterEn.customSections)
+      ]
+    });
 
-    insertTrans.run(
-      resumeId,
-      'en',
-      JSON.stringify(starterEn.personalInfo),
-      starterEn.summary,
-      JSON.stringify(starterEn.experiences),
-      JSON.stringify(starterEn.education),
-      JSON.stringify(starterEn.skills),
-      JSON.stringify(starterEn.languages),
-      JSON.stringify(starterEn.customSections)
-    );
-
-    resume = db.prepare('SELECT * FROM resumes WHERE id = ?').get(resumeId);
+    const refetch = await client.execute({
+      sql: 'SELECT * FROM resumes WHERE id = ?',
+      args: [resumeId]
+    });
+    resume = refetch.rows[0];
   }
 
-  const translations = db.prepare('SELECT * FROM resume_translations WHERE resume_id = ?').all(resume.id);
+  const transRes = await client.execute({
+    sql: 'SELECT * FROM resume_translations WHERE resume_id = ?',
+    args: [resume.id]
+  });
 
   const transMap = {};
-  for (const t of translations) {
+  for (const t of transRes.rows) {
     transMap[t.language] = {
-      personalInfo: JSON.parse(t.personal_info || '{}'),
+      personalInfo: typeof t.personal_info === 'string' ? JSON.parse(t.personal_info || '{}') : (t.personal_info || {}),
       summary: t.summary || '',
-      experiences: JSON.parse(t.experiences || '[]'),
-      education: JSON.parse(t.education || '[]'),
-      skills: JSON.parse(t.skills || '[]'),
-      languages: JSON.parse(t.languages || '[]'),
-      customSections: JSON.parse(t.custom_sections || '[]')
+      experiences: typeof t.experiences === 'string' ? JSON.parse(t.experiences || '[]') : (t.experiences || []),
+      education: typeof t.education === 'string' ? JSON.parse(t.education || '[]') : (t.education || []),
+      skills: typeof t.skills === 'string' ? JSON.parse(t.skills || '[]') : (t.skills || []),
+      languages: typeof t.languages === 'string' ? JSON.parse(t.languages || '[]') : (t.languages || []),
+      customSections: typeof t.custom_sections === 'string' ? JSON.parse(t.custom_sections || '[]') : (t.custom_sections || [])
     };
   }
 
-  const rawThemeConfig = JSON.parse(resume.theme_config || '{}');
+  let rawThemeConfig = {};
+  try {
+    rawThemeConfig = typeof resume.theme_config === 'string' ? JSON.parse(resume.theme_config || '{}') : (resume.theme_config || {});
+  } catch (_) {}
+
   let themesMap = {};
   if (rawThemeConfig.pt || rawThemeConfig.en) {
     themesMap = {
@@ -901,19 +924,25 @@ function getResumeByUserUuid(userUuid) {
   };
 }
 
-function updateResumeByUserUuid(userUuid, data) {
+async function updateResumeByUserUuid(userUuid, data) {
+  await initDatabase();
   if (!userUuid || !data) return null;
 
-  const resume = db.prepare('SELECT id FROM resumes WHERE user_uuid = ?').get(userUuid);
-  if (!resume) {
-    // Auto-create then update
-    getResumeByUserUuid(userUuid);
+  let res = await client.execute({
+    sql: 'SELECT id FROM resumes WHERE user_uuid = ?',
+    args: [userUuid]
+  });
+  if (res.rows.length === 0) {
+    await getResumeByUserUuid(userUuid);
+    res = await client.execute({
+      sql: 'SELECT id FROM resumes WHERE user_uuid = ?',
+      args: [userUuid]
+    });
   }
 
-  const currentResume = db.prepare('SELECT id FROM resumes WHERE user_uuid = ?').get(userUuid);
+  const currentResume = res.rows[0];
   if (!currentResume) return null;
 
-  // Prepare per-language themes map
   let themesToSave = data.themes;
   if (!themesToSave) {
     themesToSave = {
@@ -926,138 +955,158 @@ function updateResumeByUserUuid(userUuid, data) {
     }
   }
 
-  const updateResume = db.prepare(`
-    UPDATE resumes 
-    SET title = ?, active_language = ?, photo_url = ?, theme_config = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND user_uuid = ?
-  `);
-
-  updateResume.run(
-    data.title || 'Meu Currículo',
-    data.activeLanguage || 'pt',
-    data.photoUrl !== undefined ? data.photoUrl : null,
-    JSON.stringify(themesToSave),
-    currentResume.id,
-    userUuid
-  );
-
-  const upsertTrans = db.prepare(`
-    INSERT INTO resume_translations 
-    (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(resume_id, language) DO UPDATE SET
-      personal_info = excluded.personal_info,
-      summary = excluded.summary,
-      experiences = excluded.experiences,
-      education = excluded.education,
-      skills = excluded.skills,
-      languages = excluded.languages,
-      custom_sections = excluded.custom_sections
-  `);
+  await client.execute({
+    sql: `UPDATE resumes 
+          SET title = ?, active_language = ?, photo_url = ?, theme_config = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_uuid = ?`,
+    args: [
+      data.title || 'Meu Currículo',
+      data.activeLanguage || 'pt',
+      data.photoUrl !== undefined ? data.photoUrl : null,
+      JSON.stringify(themesToSave),
+      currentResume.id,
+      userUuid
+    ]
+  });
 
   if (data.translations) {
     for (const [lang, content] of Object.entries(data.translations)) {
-      upsertTrans.run(
-        currentResume.id,
-        lang,
-        JSON.stringify(content.personalInfo || {}),
-        content.summary || '',
-        JSON.stringify(content.experiences || []),
-        JSON.stringify(content.education || []),
-        JSON.stringify(content.skills || []),
-        JSON.stringify(content.languages || []),
-        JSON.stringify(content.customSections || [])
-      );
+      await client.execute({
+        sql: `INSERT INTO resume_translations 
+              (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(resume_id, language) DO UPDATE SET
+                personal_info = excluded.personal_info,
+                summary = excluded.summary,
+                experiences = excluded.experiences,
+                education = excluded.education,
+                skills = excluded.skills,
+                languages = excluded.languages,
+                custom_sections = excluded.custom_sections`,
+        args: [
+          currentResume.id,
+          lang,
+          JSON.stringify(content.personalInfo || {}),
+          content.summary || '',
+          JSON.stringify(content.experiences || []),
+          JSON.stringify(content.education || []),
+          JSON.stringify(content.skills || []),
+          JSON.stringify(content.languages || []),
+          JSON.stringify(content.customSections || [])
+        ]
+      });
     }
   }
 
-  return getResumeByUserUuid(userUuid);
+  return await getResumeByUserUuid(userUuid);
 }
 
-function resetResumeByUserUuid(userUuid) {
-  const user = getUserByUuid(userUuid);
+async function resetResumeByUserUuid(userUuid) {
+  await initDatabase();
+  const user = await getUserByUuid(userUuid);
   if (!user) return null;
 
-  const resume = db.prepare('SELECT id FROM resumes WHERE user_uuid = ?').get(userUuid);
+  const res = await client.execute({
+    sql: 'SELECT id FROM resumes WHERE user_uuid = ?',
+    args: [userUuid]
+  });
+  const resume = res.rows[0];
   if (!resume) return null;
 
-  // Determine reset data: Henrique gets original Henrique data; others get starter data with their own name & email
   const isHenrique = user.email.toLowerCase() === 'ht.henrique@live.com';
   const ptData = isHenrique ? defaultPortuguese : getStarterDataForUser(user.name, user.email, 'pt');
   const enData = isHenrique ? defaultEnglish : getStarterDataForUser(user.name, user.email, 'en');
 
-  const updateResume = db.prepare(`
-    UPDATE resumes 
-    SET title = ?, active_language = 'pt', photo_url = ?, theme_config = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND user_uuid = ?
-  `);
+  await client.execute({
+    sql: `UPDATE resumes 
+          SET title = ?, active_language = 'pt', photo_url = ?, theme_config = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND user_uuid = ?`,
+    args: [
+      isHenrique ? 'Henrique Teixeira - Engenheiro de Software Java' : `Currículo de ${user.name}`,
+      isHenrique ? '/henrique_avatar.png' : null,
+      JSON.stringify(defaultThemes),
+      resume.id,
+      userUuid
+    ]
+  });
 
-  updateResume.run(
-    isHenrique ? 'Henrique Teixeira - Engenheiro de Software Java' : `Currículo de ${user.name}`,
-    isHenrique ? '/henrique_avatar.png' : null,
-    JSON.stringify(defaultThemes),
-    resume.id,
-    userUuid
-  );
+  await client.execute({
+    sql: `INSERT INTO resume_translations 
+          (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(resume_id, language) DO UPDATE SET
+            personal_info = excluded.personal_info,
+            summary = excluded.summary,
+            experiences = excluded.experiences,
+            education = excluded.education,
+            skills = excluded.skills,
+            languages = excluded.languages,
+            custom_sections = excluded.custom_sections`,
+    args: [
+      resume.id,
+      'pt',
+      JSON.stringify(ptData.personalInfo),
+      ptData.summary,
+      JSON.stringify(ptData.experiences),
+      JSON.stringify(ptData.education),
+      JSON.stringify(ptData.skills),
+      JSON.stringify(ptData.languages),
+      JSON.stringify(ptData.customSections)
+    ]
+  });
 
-  const upsertTrans = db.prepare(`
-    INSERT INTO resume_translations 
-    (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(resume_id, language) DO UPDATE SET
-      personal_info = excluded.personal_info,
-      summary = excluded.summary,
-      experiences = excluded.experiences,
-      education = excluded.education,
-      skills = excluded.skills,
-      languages = excluded.languages,
-      custom_sections = excluded.custom_sections
-  `);
+  await client.execute({
+    sql: `INSERT INTO resume_translations 
+          (resume_id, language, personal_info, summary, experiences, education, skills, languages, custom_sections)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(resume_id, language) DO UPDATE SET
+            personal_info = excluded.personal_info,
+            summary = excluded.summary,
+            experiences = excluded.experiences,
+            education = excluded.education,
+            skills = excluded.skills,
+            languages = excluded.languages,
+            custom_sections = excluded.custom_sections`,
+    args: [
+      resume.id,
+      'en',
+      JSON.stringify(enData.personalInfo),
+      enData.summary,
+      JSON.stringify(enData.experiences),
+      JSON.stringify(enData.education),
+      JSON.stringify(enData.skills),
+      JSON.stringify(enData.languages),
+      JSON.stringify(enData.customSections)
+    ]
+  });
 
-  upsertTrans.run(
-    resume.id,
-    'pt',
-    JSON.stringify(ptData.personalInfo),
-    ptData.summary,
-    JSON.stringify(ptData.experiences),
-    JSON.stringify(ptData.education),
-    JSON.stringify(ptData.skills),
-    JSON.stringify(ptData.languages),
-    JSON.stringify(ptData.customSections)
-  );
-
-  upsertTrans.run(
-    resume.id,
-    'en',
-    JSON.stringify(enData.personalInfo),
-    enData.summary,
-    JSON.stringify(enData.experiences),
-    JSON.stringify(enData.education),
-    JSON.stringify(enData.skills),
-    JSON.stringify(enData.languages),
-    JSON.stringify(enData.customSections)
-  );
-
-  return getResumeByUserUuid(userUuid);
+  return await getResumeByUserUuid(userUuid);
 }
 
 // Photo storage
-function savePhotoToDb(filename, mimeType, dataBase64, userUuid = null) {
-  const stmt = db.prepare(`
-    INSERT INTO photos (filename, mime_type, data_base64, user_uuid)
-    VALUES (?, ?, ?, ?)
-  `);
-  const result = stmt.run(filename, mimeType, dataBase64, userUuid);
-  return result.lastInsertRowid;
+async function savePhotoToDb(filename, mimeType, dataBase64, userUuid = null) {
+  await initDatabase();
+  const res = await client.execute({
+    sql: `INSERT INTO photos (filename, mime_type, data_base64, user_uuid) VALUES (?, ?, ?, ?)`,
+    args: [filename, mimeType, dataBase64, userUuid]
+  });
+  return Number(res.lastInsertRowid);
 }
 
-function getPhotoFromDb(id) {
-  return db.prepare('SELECT * FROM photos WHERE id = ?').get(id);
+async function getPhotoFromDb(id) {
+  await initDatabase();
+  const res = await client.execute({
+    sql: 'SELECT * FROM photos WHERE id = ?',
+    args: [id]
+  });
+  return res.rows[0] || null;
 }
 
 module.exports = {
-  db,
-  dbPath,
+  client,
+  isTurso,
+  tursoUrl,
+  initDatabase,
   createUser,
   authenticateUser,
   getUserByUuid,

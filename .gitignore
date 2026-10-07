@@ -10,3 +10,5 @@ uploads/
 server/uploads/
 server/*.db*
 *.db*
+.env
+*.env
