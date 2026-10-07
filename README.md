@@ -45,10 +45,11 @@ Desenvolvido com base no layout elegante de duas colunas (estilo *Enhancv*), pro
 - **Tipografia**: Suporte a fontes Inter, Roboto, Poppins e Merriweather.
 - **Foto de Perfil Opcional**: Upload direto no banco de dados (Base64) ou modo limpo (sem foto), com formatos Circular, Arredondado ou Quadrado.
 
-### 💾 Banco de Dados SQLite & Ferramentas Admin
-- Armazenamento de usuários, currículos, seções, traduções e fotos via `better-sqlite3`.
-- **Painel de Inspeção Web**: Acesse `/api/admin/db-inspect` para visualizar todas as tabelas em HTML ou JSON.
-- **Backup / Download**: Acesse `/api/admin/db-download` para baixar o arquivo físico `curriculo.db`.
+### 💾 Banco de Dados Turso Cloud (LibSQL) & Ferramentas Admin
+- Armazenamento em nuvem permanente de usuários, currículos, seções, traduções e fotos via `@libsql/client` (Turso).
+- **Zero perda de dados**: Persistência global em nuvem, independente de reinicializações da Vercel.
+- **Painel de Inspeção Web**: Acesse `/api/admin/db-inspect` para visualizar todas as tabelas em HTML ou JSON em tempo real.
+- **Painel Turso Web Console**: Gerencie e consulte o banco via interface visual oficial do Turso.
 
 ---
 
