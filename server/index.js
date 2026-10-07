@@ -4,6 +4,8 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const {
+  db,
+  dbPath,
   createUser,
   authenticateUser,
   getUserByUuid,
@@ -102,6 +104,159 @@ function requireAuth(req, res, next) {
 // Routes
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Admin / Inspection routes to view and download SQLite database contents
+app.get('/api/admin/db-download', (req, res) => {
+  try {
+    if (!fs.existsSync(dbPath)) {
+      return res.status(404).send('Arquivo SQLite curriculo.db não encontrado no servidor.');
+    }
+    res.download(dbPath, 'curriculo.db');
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao baixar arquivo do banco', message: err.message });
+  }
+});
+
+app.get('/api/admin/db-inspect', (req, res) => {
+  try {
+    const users = db.prepare('SELECT id, uuid, name, email, created_at, updated_at FROM users').all();
+    const resumes = db.prepare('SELECT id, user_id, user_uuid, slug, title, active_language, photo_url, created_at, updated_at FROM resumes').all();
+    const translations = db.prepare('SELECT id, resume_id, language, length(personal_info) as personal_info_size, length(summary) as summary_size, length(experiences) as experiences_size, length(skills) as skills_size FROM resume_translations').all();
+    const photos = db.prepare('SELECT id, user_uuid, filename, mime_type, length(data_base64) as data_size_bytes, created_at FROM photos').all();
+
+    const dbStats = {
+      dbPath,
+      fileSizeBytes: fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0,
+      timestamp: new Date().toISOString(),
+      counts: {
+        users: users.length,
+        resumes: resumes.length,
+        translations: translations.length,
+        photos: photos.length
+      }
+    };
+
+    if (req.query.format === 'json' || req.headers.accept?.includes('application/json')) {
+      return res.json({
+        stats: dbStats,
+        users,
+        resumes,
+        translations,
+        photos
+      });
+    }
+
+    // Render HTML table view
+    const renderTable = (title, columns, rows) => {
+      if (!rows || rows.length === 0) {
+        return `<div class="card"><h2>${title} (0)</h2><p class="empty">Nenhum registro encontrado nesta tabela.</p></div>`;
+      }
+      const headers = columns.map(c => `<th>${c}</th>`).join('');
+      const bodyRows = rows.map(r => `<tr>${columns.map(c => `<td>${r[c] !== null && r[c] !== undefined ? String(r[c]) : '<span class="null">null</span>'}</td>`).join('')}</tr>`).join('');
+      return `
+        <div class="card">
+          <h2>${title} (${rows.length})</h2>
+          <div class="table-wrapper">
+            <table>
+              <thead><tr>${headers}</tr></thead>
+              <tbody>${bodyRows}</tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    };
+
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SQLite Inspector - Vercel Database</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --accent: #22c55e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    body { background-color: var(--bg); color: var(--text); padding: 2rem 1rem; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 1.5rem; }
+    h1 { font-size: 1.75rem; font-weight: 700; color: #fff; }
+    .badge { background: #0369a1; color: #bae6fd; font-size: 0.8rem; font-weight: 600; padding: 0.25rem 0.6rem; border-radius: 9999px; margin-left: 0.5rem; }
+    .btn { display: inline-flex; align-items: center; gap: 0.5rem; background: var(--primary); color: #0f172a; text-decoration: none; font-weight: 600; font-size: 0.875rem; padding: 0.6rem 1.2rem; border-radius: 0.5rem; transition: opacity 0.2s; }
+    .btn:hover { opacity: 0.9; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+    .stat-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 0.75rem; padding: 1.25rem; }
+    .stat-card .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+    .stat-card .val { font-size: 1.5rem; font-weight: 700; color: #fff; margin-top: 0.25rem; }
+    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 0.75rem; padding: 1.25rem; margin-bottom: 1.5rem; overflow: hidden; }
+    .card h2 { font-size: 1.15rem; font-weight: 600; color: #e2e8f0; margin-bottom: 1rem; }
+    .table-wrapper { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.875rem; text-align: left; }
+    th { background: #0f172a; color: var(--text-muted); font-weight: 600; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); }
+    td { padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); color: #e2e8f0; word-break: break-all; }
+    tr:last-child td { border-bottom: none; }
+    .null { color: #64748b; font-style: italic; }
+    .empty { color: var(--text-muted); font-style: italic; padding: 0.5rem 0; }
+    .footer { text-align: center; color: var(--text-muted); font-size: 0.8rem; margin-top: 2rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Visualizador do SQLite <span class="badge">PRODUÇÃO</span></h1>
+        <p style="color: var(--text-muted); font-size: 0.875rem; margin-top: 0.25rem;">Arquivo: <code>${dbPath}</code> (${(dbStats.fileSizeBytes / 1024).toFixed(1)} KB)</p>
+      </div>
+      <div style="display: flex; gap: 0.5rem;">
+        <a href="/api/admin/db-inspect?format=json" class="btn" style="background: #334155; color: #f8fafc;" target="_blank">Ver JSON</a>
+        <a href="/api/admin/db-download" class="btn">📥 Baixar curriculo.db</a>
+      </div>
+    </header>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="label">Total de Usuários</div>
+        <div class="val">${dbStats.counts.users}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Currículos Criados</div>
+        <div class="val">${dbStats.counts.resumes}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Traduções Gravadas</div>
+        <div class="val">${dbStats.counts.translations}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Fotos de Perfil</div>
+        <div class="val">${dbStats.counts.photos}</div>
+      </div>
+    </div>
+
+    ${renderTable('Tabela: users (Usuários Cadastrados)', ['id', 'uuid', 'name', 'email', 'created_at'], users)}
+    ${renderTable('Tabela: resumes (Currículos)', ['id', 'user_id', 'user_uuid', 'title', 'active_language', 'slug', 'created_at', 'updated_at'], resumes)}
+    ${renderTable('Tabela: resume_translations (Traduções PT/EN)', ['id', 'resume_id', 'language', 'personal_info_size', 'summary_size', 'experiences_size', 'skills_size'], translations)}
+    ${renderTable('Tabela: photos (Fotos no Banco)', ['id', 'user_uuid', 'filename', 'mime_type', 'data_size_bytes', 'created_at'], photos)}
+
+    <div class="footer">
+      Currículo Web App • Instância SQLite • ${new Date().toLocaleString('pt-BR')}
+    </div>
+  </div>
+</body>
+</html>`;
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    console.error('Erro ao inspecionar banco SQLite:', err);
+    res.status(500).json({ error: 'Erro ao inspecionar SQLite', message: err.message, stack: err.stack });
+  }
 });
 
 // ---------------- AUTH ROUTES ----------------

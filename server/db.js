@@ -1057,6 +1057,7 @@ function getPhotoFromDb(id) {
 
 module.exports = {
   db,
+  dbPath,
   createUser,
   authenticateUser,
   getUserByUuid,
